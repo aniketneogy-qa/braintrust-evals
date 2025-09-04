@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "eval:weather": "tsx scripts/eval.weather.ts",
+    "eval:agent": "tsx scripts/eval.agent.ts"
   },
   "dependencies": {
     "@ai-sdk/openai": "^1.0.10",
@@ -17,6 +19,7 @@
     "braintrust": "^0.0.202",
     "d3-scale": "^4.0.2",
     "date-fns": "^3.6.0",
+    "dotenv": "^17.2.2",
     "framer-motion": "^11.3.19",
     "next": "^14.2.28",
     "react": "^18",
@@ -36,6 +39,7 @@
     "eslint-config-next": "14.2.5",
     "postcss": "^8",
     "tailwindcss": "^3.4.1",
+    "tsx": "^4.20.5",
     "typescript": "^5"
   }
 }

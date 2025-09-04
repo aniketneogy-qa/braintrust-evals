@@ -1,20 +1,12 @@
 import { openai } from "@ai-sdk/openai";
 import { streamText, ToolInvocation } from "ai";
 import { getWeather, getFahrenheit } from "@/components/tools";
-// Uncomment below to use Braintrust's tracing features
-// import { initLogger, wrapAISDKModel, traced, currentSpan } from "braintrust";
+// Centralized Braintrust utilities (logger, masking, helpers)
+import { wrapAISDKModel, traced, currentSpan, logger } from "@/lib/braintrust";
+import { weatherLLMJudgeScore, generalLLMJudgeScore, contentAccuracyScore } from "@/lib/scorers";
 
-// Initialize Braintrust as the logging backend. Uncomment below
-// const logger = initLogger({
-//  apiKey: process.env.BRAINTRUST_API_KEY,
-//  projectName: process.env.BRAINTRUST_PROJECT_NAME,
-// });
-
-// Any time this model is called, the input and output will be logged to Braintrust. Uncomment below
-const model = //wrapAISDKModel(
-  openai("gpt-4o")
-// Uncomment below
-// );
+// Any time this model is called, the input and output will be logged to Braintrust.
+const model = wrapAISDKModel(openai("gpt-4o"));
 
 interface Message {
   role: "user" | "assistant";
@@ -24,8 +16,11 @@ interface Message {
 
 export async function POST(request: Request) {
   // traced starts a trace span when the POST endpoint is used
-  // Unlike wrapTraced, traced does not natively log inputs and outputs. Uncomment below
-  // return traced(async (span) => {
+  // Unlike wrapTraced, traced does not natively log inputs and outputs.
+  return traced(
+    async (span) => {
+      const url = new URL(request.url);
+      const mode = url.searchParams.get("mode");
       const { messages }: { messages: Message[] } = await request.json();
 
       const stream = await streamText({
@@ -46,16 +41,65 @@ export async function POST(request: Request) {
         experimental_telemetry: {
           isEnabled: true,
         },
-      // When streamText is finished, log the input and output of the stream for the "root" span. Uncomment below
-      // onFinish: (result) => {
-      //   currentSpan().log({
-      //     input: messages,
-      //     output: result.text,
-      //   });
-      // },
-        });
+        // When streamText is finished, log the input, output, and simple online scores
+        onFinish: (result) => {
+          const text = result.text ?? "";
+          const mentionsFahrenheit = /fahrenheit|\bF\b/i.test(text);
+          const hasNumber = /\d+/.test(text);
+          const span = currentSpan();
+          span.log({
+            input: messages,
+            output: text,
+            metadata: { model: "gpt-4o" },
+            scores: {
+              fahrenheit_presence: mentionsFahrenheit ? 1 : 0,
+              contains_number: hasNumber ? 1 : 0,
+            },
+          });
 
+          // Fire-and-forget: compute LLM-judge scores and update the span
+          (async () => {
+            try {
+              const [weatherJudge, generalJudge] = await Promise.all([
+                weatherLLMJudgeScore({ input: messages?.[messages.length - 1]?.content, output: text }),
+                generalLLMJudgeScore({ input: messages?.[messages.length - 1]?.content, output: text }),
+              ]);
+
+              // Optional: lightweight content_accuracy using generic phrases
+              const contentScore = contentAccuracyScore({
+                output: text,
+                expected: { requiredPhrases: ["temperature", "weather"] },
+              });
+
+              await logger.updateSpan({
+                id: span.id,
+                scores: {
+                  ...((weatherJudge?.score != null) ? { weather_llm_judge: weatherJudge.score } : {}),
+                  ...((generalJudge?.score != null) ? { general_llm_judge: generalJudge.score } : {}),
+                  ...((contentScore?.score != null) ? { content_accuracy: contentScore.score } : {}),
+                },
+                metadata: {
+                  online_eval: {
+                    weather_llm_judge: weatherJudge?.metadata,
+                    general_llm_judge: generalJudge?.metadata,
+                    content_accuracy: contentScore?.metadata,
+                  },
+                },
+              });
+            } catch (e) {
+              // Best-effort; do not disrupt request
+            }
+          })();
+        },
+      });
+
+      // Support plain text streaming for evals (avoids frame output in experiments)
+      if (mode === "text") {
+        return stream.toTextStreamResponse();
+      }
       return stream.toDataStreamResponse();
-    }
-    // Show the this span as a function and name the span POST /api/chat. Uncomment below
-    // ,{ type: "function", name: "POST /api/chat" });}
+    },
+    // Show this span as a function and name the span POST /api/chat.
+    { type: "function", name: "POST /api/chat" },
+  );
+}
